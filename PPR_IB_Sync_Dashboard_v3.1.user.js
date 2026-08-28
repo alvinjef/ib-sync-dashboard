@@ -7,8 +7,8 @@
 // @version      3.1
 
 // @author       Alvin Jefferson (alvinjef)
-// @updateURL    https://YOUR_SHAREPOINT_OR_ONEDRIVE_URL/PPR_IB_Sync_Dashboard.user.js
-// @downloadURL  https://YOUR_SHAREPOINT_OR_ONEDRIVE_URL/PPR_IB_Sync_Dashboard.user.js
+// @updateURL    https://github.com/alvinjef/ib-sync-dashboard/raw/refs/heads/main/PPR_IB_Sync_Dashboard_v3.1.user.js
+// @downloadURL  https://github.com/alvinjef/ib-sync-dashboard/raw/refs/heads/main/PPR_IB_Sync_Dashboard_v3.1.user.js
 // @description  Auto-pull IB metrics: NTP from INTRO APIs, COST from FCLM (LP Rate/Actual Rate), Input Metrics from Vantage, Audits from Apollo (audit_execution_metrics with period filtering). Single script.
 
 // @match        https://fclm-portal.amazon.com/reports/processPathRollup*
