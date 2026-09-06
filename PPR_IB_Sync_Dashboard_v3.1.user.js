@@ -4,11 +4,8 @@
 
 // @namespace    http://tampermonkey.net/
 
-// @version      3.1
+// @version      3.2
 
-// @author       Alvin Jefferson (alvinjef)
-// @updateURL    https://github.com/alvinjef/ib-sync-dashboard/raw/refs/heads/main/PPR_IB_Sync_Dashboard_v3.1.user.js
-// @downloadURL  https://github.com/alvinjef/ib-sync-dashboard/raw/refs/heads/main/PPR_IB_Sync_Dashboard_v3.1.user.js
 // @description  Auto-pull IB metrics: NTP from INTRO APIs, COST from FCLM (LP Rate/Actual Rate), Input Metrics from Vantage, Audits from Apollo (audit_execution_metrics with period filtering). Single script.
 
 // @match        https://fclm-portal.amazon.com/reports/processPathRollup*
@@ -39,6 +36,7 @@
 
 // @connect      alps-iad.iad.proxy.amazon.com
 
+// @connect      ont-base.corp.amazon.com
 // @require      https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js
 
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
@@ -1629,7 +1627,8 @@
 
             // ALPs: S1 Capacity Forecast (Weekly plan)
 
-            fetchALPsS1()];
+            fetchALPsS1(),
+            fetchPilesData()];
 
 
 
@@ -5413,7 +5412,7 @@
 
             { metric: 'BFV DPMO', goal: bfvDpmo.threshold, eos: bfvDpmo.val, warn: atlasOrNull['Bin Filter Violation'] && atlasOrNull['Bin Filter Violation'].dpmo > atlasOrNull['Bin Filter Violation'].threshold },
 
-            { metric: 'Problem Solve Piles', goal: '' },
+            { metric: 'Problem Solve Piles', goal: '', eos: window._ibSyncPilesTotal || '' },
 
             { metric: 'IOLs', goal: '' },
 
@@ -7421,6 +7420,8 @@
 
     function initSyncDashboard() {
 
+        console.log('[IB Sync v3.1] Waiting 15s for PPR VS LP to load first...');
+        setTimeout(function() {
         console.log('[IB Sync v3.1] Initializing dashboard...');
 
 
@@ -7463,7 +7464,8 @@
 
 
 
-        setTimeout(function() { clearInterval(waitForTable); buildDashboard(); }, 25000);
+        setTimeout(function() { clearInterval(waitForTable); }, 20000);
+        }, 15000); // 15s startup delay for PPR VS LP
 
 
 
@@ -7509,96 +7511,230 @@
 
     // Uses existing Midway session. Portable across all sites.
 
-    function fetchALPsS1() {
+    
+    function fetchPilesData() {
         return new Promise(function(resolve) {
-            var alpsBase = 'https://alps-iad.iad.proxy.amazon.com/api';
-            var FRIDAY_PLAN_FALLBACK = '8409bf2c-422b-420b-9086-1b85a820c31e';
+            var today = new Date();
+            var dateStr = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0') + '-' + String(today.getDate()).padStart(2,'0');
+            var shift = (function() { var h = new Date().getHours(); return (h >= 6 && h < 18) ? 'Day' : 'Night'; })();
+            var auditShift = shift === 'Day' ? 'Days' : 'Nights';
+            var pilesUrl = 'https://ont-base.corp.amazon.com/en/' + WAREHOUSE + '/icqa/piles/report?audit_date=' + dateStr + '&audit_number=1&audit_shift=' + auditShift;
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: pilesUrl,
+                headers: { 'Accept': 'text/html' },
+                onload: function(resp) {
+                    if (resp.status !== 200) { resolve(null); return; }
+                    try {
+                        var doc = new DOMParser().parseFromString(resp.responseText, 'text/html');
+                        var ibRow = doc.querySelector('tr[data-department="inbound"]');
+                        if (!ibRow) { resolve(null); return; }
+                        var cells = ibRow.querySelectorAll('td');
+                        var pilesTotal = null;
+                        if (cells.length >= 2) {
+                            pilesTotal = parseInt(cells[1].textContent.trim().replace(/,/g, ''));
+                            if (isNaN(pilesTotal)) pilesTotal = null;
+                        }
+                        var isIncomplete = doc.body.textContent.indexOf('Audit Is Incomplete') !== -1;
+                        if (pilesTotal) {
+                            var display = pilesTotal.toLocaleString();
+                            if (isIncomplete) display += ' (In Progress)';
+                            window._ibSyncPilesTotal = display;
+                        }
+                        resolve(pilesTotal);
+                    } catch(e) { resolve(null); }
+                },
+                onerror: function() { resolve(null); }
+            });
+        });
+    }
 
-            var tagUrl = alpsBase + '/site/' + WAREHOUSE + '/latest-completed-plan-by-tag?tagName=Weekly&siteType=FULFILLMENT_CENTER&polling=false';
-            console.log('[IB Sync] ALPs S1: Fetching Weekly plan for', WAREHOUSE);
+function fetchALPsS1() {
+
+        return new Promise(function(resolve) {
+
+            var alpsBase = 'https://alps-iad.iad.proxy.amazon.com/api';
+
+            var planTagUrl = alpsBase + '/site/' + WAREHOUSE + '/latest-completed-plan-by-tag?tagName=Weekly&siteType=FULFILLMENT_CENTER&polling=false';
+
+            console.log('[IB Sync] ALPs S1: Fetching latest Weekly plan for', WAREHOUSE);
 
             GM_xmlhttpRequest({
-                method: 'GET', url: tagUrl, headers: { 'Accept': 'application/json' },
+
+                method: 'GET',
+
+                url: planTagUrl,
+
+                headers: { 'Accept': 'application/json' },
+
                 onload: function(resp) {
-                    if (resp.status !== 200) { fetchCapacityData(FRIDAY_PLAN_FALLBACK); return; }
+
+                    if (resp.status !== 200) {
+
+                        console.log('[IB Sync] ALPs S1: Failed to get Weekly plan, status:', resp.status);
+
+                        resolve(null);
+
+                        return;
+
+                    }
+
                     try {
+
                         var tagData = JSON.parse(resp.responseText);
-                        var planId = tagData.planId || tagData.id || null;
-                        if (!planId) {
+
+                        console.log('[IB Sync] ALPs S1: Tag response keys:', Object.keys(tagData).join(', '));
+
+                        // Extract plan ID from response
+
+                        var planId = tagData.planId || tagData.id || (tagData.plan && tagData.plan.id) || null;
+
+                        if (!planId && typeof tagData === 'object') {
+
+                            // Search for UUID pattern in top-level values
+
                             var keys = Object.keys(tagData);
+
                             for (var k = 0; k < keys.length; k++) {
-                                if (typeof tagData[keys[k]] === 'string' && tagData[keys[k]].match(/^[0-9a-f]{8}-/)) { planId = tagData[keys[k]]; break; }
+
+                                var val = tagData[keys[k]];
+
+                                if (typeof val === 'string' && val.match(/^[0-9a-f]{8}-[0-9a-f]{4}-/)) {
+
+                                    planId = val; break;
+
+                                }
+
                             }
+
                         }
-                        if (!planId) { fetchCapacityData(FRIDAY_PLAN_FALLBACK); return; }
-                        console.log('[IB Sync] ALPs S1: Tag returned plan:', planId);
-                        validatePlan(planId);
-                    } catch(e) { fetchCapacityData(FRIDAY_PLAN_FALLBACK); }
+
+                        if (!planId) {
+
+                            console.log('[IB Sync] ALPs S1: No plan ID found. Response:', JSON.stringify(tagData).substring(0, 1000));
+
+                            resolve(null);
+
+                            return;
+
+                        }
+
+                        console.log('[IB Sync] ALPs S1: Weekly plan ID =', planId);
+
+
+
+                        // Step 2: Get plan capacity data
+
+                        // Calculate date range centered on the FCLM page date
+
+                        var fclmUrlParams = new URLSearchParams(window.location.search);
+
+                        var fclmSpanType = fclmUrlParams.get('spanType') || '';
+
+                        var fclmDateStr = '';
+
+                        if (fclmSpanType === 'Intraday') {
+
+                            fclmDateStr = (fclmUrlParams.get('startDateIntraday') || '').split(/[\s+T]/)[0];
+
+                        } else if (fclmSpanType === 'Week') {
+
+                            fclmDateStr = fclmUrlParams.get('startDateWeek') || '';
+
+                        } else {
+
+                            fclmDateStr = fclmUrlParams.get('startDateDay') || '';
+
+                        }
+
+                        var centerDate = fclmDateStr ? new Date(fclmDateStr.replace(/\//g, '-')) : new Date();
+
+                        if (isNaN(centerDate.getTime())) centerDate = new Date();
+
+                        var startDate = new Date(centerDate);
+
+                        startDate.setDate(centerDate.getDate() - 7);
+
+                        var endDate = new Date(centerDate);
+
+                        endDate.setDate(centerDate.getDate() + 7);
+
+                        var startStr = startDate.getFullYear() + '-' + String(startDate.getMonth()+1).padStart(2,'0') + '-' + String(startDate.getDate()).padStart(2,'0');
+
+                        var endStr = endDate.getFullYear() + '-' + String(endDate.getMonth()+1).padStart(2,'0') + '-' + String(endDate.getDate()).padStart(2,'0');
+
+                        var dataUrl = alpsBase + '/report/FULFILLMENT_CENTER/' + WAREHOUSE + '/getPlanSelectionData'
+
+                            + '?view=dailyView&selection=inbound-joint&planId=' + planId + '&withUserOverrides=true'
+
+                            + '&startDate=' + startStr + '&endDate=' + endStr + '&withComputedValues=true';
+
+                        console.log('[IB Sync] ALPs S1: Fetching plan data with dates', startStr, 'to', endStr);
+
+                        GM_xmlhttpRequest({
+
+                            method: 'GET',
+
+                            url: dataUrl,
+
+                            headers: { 'Accept': 'application/json' },
+
+                            onload: function(resp2) {
+
+                                if (resp2.status !== 200) {
+
+                                    console.log('[IB Sync] ALPs S1: Failed to get plan data, status:', resp2.status);
+
+                                    resolve(null);
+
+                                    return;
+
+                                }
+
+                                try {
+
+                                    var planData = JSON.parse(resp2.responseText);
+
+                                    console.log('[IB Sync] ALPs S1: Plan data keys:', Object.keys(planData).join(', '));
+
+                                    console.log('[IB Sync] ALPs S1: Plan data sample:', JSON.stringify(planData).substring(0, 2000));
+
+                                    var s1 = parseALPsCapacity(planData);
+
+                                    console.log('[IB Sync] ALPs S1: Parsed =', JSON.stringify(s1));
+
+                                    resolve(s1);
+
+                                } catch(e) {
+
+                                    console.log('[IB Sync] ALPs S1: Parse error:', e.message);
+
+                                    resolve(null);
+
+                                }
+
+                            },
+
+                            onerror: function() { resolve(null); }
+
+                        });
+
+                    } catch(e) {
+
+                        console.log('[IB Sync] ALPs S1: Tag parse error:', e.message);
+
+                        resolve(null);
+
+                    }
+
                 },
-                onerror: function() { fetchCapacityData(FRIDAY_PLAN_FALLBACK); }
+
+                onerror: function() { resolve(null); }
+
             });
 
-            function validatePlan(planId) {
-                var metaUrl = alpsBase + '/site/' + WAREHOUSE + '/plan/' + planId + '/metadata';
-                GM_xmlhttpRequest({
-                    method: 'GET', url: metaUrl, headers: { 'Accept': 'application/json' },
-                    onload: function(metaResp) {
-                        if (metaResp.status !== 200) { fetchCapacityData(FRIDAY_PLAN_FALLBACK); return; }
-                        try {
-                            var meta = JSON.parse(metaResp.responseText);
-                            var planMeta = meta.planMetaData || meta;
-                            var createdAt = planMeta.createdAt || planMeta.planDate || '';
-                            var createdDate = new Date(createdAt);
-                            var dayOfWeek = createdDate.getDay();
-                            var dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dayOfWeek];
-                            console.log('[IB Sync] ALPs S1: Plan created', dayName, createdAt);
-                            if (dayOfWeek === 5) {
-                                console.log('[IB Sync] ALPs S1: VALIDATED Friday plan');
-                                fetchCapacityData(planId);
-                            } else {
-                                console.log('[IB Sync] ALPs S1: REJECTED (not Friday). Using fallback.');
-                                fetchCapacityData(FRIDAY_PLAN_FALLBACK);
-                            }
-                        } catch(e) { fetchCapacityData(FRIDAY_PLAN_FALLBACK); }
-                    },
-                    onerror: function() { fetchCapacityData(FRIDAY_PLAN_FALLBACK); }
-                });
-            }
-
-            function fetchCapacityData(planId) {
-                var fclmUrlParams = new URLSearchParams(window.location.search);
-                var fclmSpanType = fclmUrlParams.get('spanType') || '';
-                var fclmDateStr = '';
-                if (fclmSpanType === 'Intraday') fclmDateStr = (fclmUrlParams.get('startDateIntraday') || '').split(/[\s+T]/)[0];
-                else if (fclmSpanType === 'Week') fclmDateStr = fclmUrlParams.get('startDateWeek') || '';
-                else fclmDateStr = fclmUrlParams.get('startDateDay') || '';
-                var centerDate = fclmDateStr ? new Date(fclmDateStr.replace(/\//g, '-')) : new Date();
-                if (isNaN(centerDate.getTime())) centerDate = new Date();
-                var sd = new Date(centerDate); sd.setDate(centerDate.getDate() - 7);
-                var ed = new Date(centerDate); ed.setDate(centerDate.getDate() + 7);
-                var startStr = sd.getFullYear() + '-' + String(sd.getMonth()+1).padStart(2,'0') + '-' + String(sd.getDate()).padStart(2,'0');
-                var endStr = ed.getFullYear() + '-' + String(ed.getMonth()+1).padStart(2,'0') + '-' + String(ed.getDate()).padStart(2,'0');
-
-                var dataUrl = alpsBase + '/report/FULFILLMENT_CENTER/' + WAREHOUSE + '/getPlanSelectionData'
-                    + '?view=dailyView&selection=inbound-joint&planId=' + planId
-                    + '&withUserOverrides=true&startDate=' + startStr + '&endDate=' + endStr + '&withComputedValues=true';
-                console.log('[IB Sync] ALPs S1: Fetching capacity, plan:', planId, 'dates:', startStr, 'to', endStr);
-
-                GM_xmlhttpRequest({
-                    method: 'GET', url: dataUrl, headers: { 'Accept': 'application/json' },
-                    onload: function(resp) {
-                        if (resp.status !== 200) { console.log('[IB Sync] ALPs S1: Data fetch failed:', resp.status); resolve(null); return; }
-                        try {
-                            var planData = JSON.parse(resp.responseText);
-                            var s1 = parseALPsCapacity(planData);
-                            console.log('[IB Sync] ALPs S1: Parsed =', JSON.stringify(s1));
-                            resolve(s1);
-                        } catch(e) { console.log('[IB Sync] ALPs S1: Parse error:', e.message); resolve(null); }
-                    },
-                    onerror: function() { resolve(null); }
-                });
-            }
         });
+
     }
 
 
