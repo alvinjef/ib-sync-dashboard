@@ -13,6 +13,8 @@
 // @grant        GM_xmlhttpRequest
 
 // @grant        GM_setClipboard
+// @grant        GM_setValue
+// @grant        GM_getValue
 
 // @connect      apollo-audit.corp.amazon.com
 
@@ -2100,13 +2102,7 @@
 
             console.log('[IB Sync] Optimus Target:', result.optimusTarget);
 
-            // S1 Goal = current shift target + opposite shift target (full day)
-
-            var oppositeTarget = (targetVolumeOpposite && targetVolumeOpposite.targetVolume) ? Math.round(targetVolumeOpposite.targetVolume) : 0;
-
-            result.s1Goal = result.optimusTarget + oppositeTarget;
-
-            console.log('[IB Sync] S1 Goal (full day):', result.s1Goal, '= current:', result.optimusTarget, '+ opposite:', oppositeTarget);
+            // S1 Goal: ALPs only. No Optimus fallback.
 
             
 
@@ -7550,191 +7546,148 @@
     }
 
 function fetchALPsS1() {
-
         return new Promise(function(resolve) {
-
             var alpsBase = 'https://alps-iad.iad.proxy.amazon.com/api';
 
-            var planTagUrl = alpsBase + '/site/' + WAREHOUSE + '/latest-completed-plan-by-tag?tagName=Weekly&siteType=FULFILLMENT_CENTER&polling=false';
+            // Step 1: Get the FCLM page date (the date being reviewed)
+            var fclmUrlParams = new URLSearchParams(window.location.search);
+            var fclmSpanType = fclmUrlParams.get('spanType') || '';
+            var fclmDateStr = '';
+            if (fclmSpanType === 'Intraday') fclmDateStr = (fclmUrlParams.get('startDateIntraday') || '').split(/[\s+T]/)[0];
+            else if (fclmSpanType === 'Week') fclmDateStr = fclmUrlParams.get('startDateWeek') || '';
+            else fclmDateStr = fclmUrlParams.get('startDateDay') || '';
+            var reviewDate = fclmDateStr ? new Date(fclmDateStr.replace(/\//g, '-') + 'T12:00:00') : new Date();
+            if (isNaN(reviewDate.getTime())) reviewDate = new Date();
 
-            console.log('[IB Sync] ALPs S1: Fetching latest Weekly plan for', WAREHOUSE);
+            // Step 2: Find the Friday whose plan governs this review date
+            var jsDow = reviewDate.getDay();
+            var daysSinceSunday = jsDow;
+            var weekStartSunday = new Date(reviewDate);
+            weekStartSunday.setDate(reviewDate.getDate() - daysSinceSunday);
+            var planFriday = new Date(weekStartSunday);
+            planFriday.setDate(weekStartSunday.getDate() - 2);
+            planFriday.setHours(0, 0, 0, 0);
+            var searchEnd = new Date(planFriday);
+            searchEnd.setDate(planFriday.getDate() + 2);
+            searchEnd.setHours(23, 59, 59, 999);
 
+            var rangeUrl = alpsBase + '/site/' + WAREHOUSE + '/completed-plans-by-date-range'
+                + '?siteType=FULFILLMENT_CENTER'
+                + '&inclusiveStartTime=' + planFriday.getTime()
+                + '&exclusiveEndTime=' + searchEnd.getTime()
+                + '&exhaustive=true&includeErrorPlans=false';
+
+            console.log('[IB Sync] ALPs S1: Review date:', reviewDate.toISOString().substring(0,10),
+                '| Plan Friday:', planFriday.toISOString().substring(0,10),
+                '| Range:', planFriday.getTime(), 'to', searchEnd.getTime(),
+                '| URL:', rangeUrl);
+
+            // Step 3: Get all plans in Friday-Saturday range
             GM_xmlhttpRequest({
-
                 method: 'GET',
-
-                url: planTagUrl,
-
+                url: rangeUrl,
                 headers: { 'Accept': 'application/json' },
-
                 onload: function(resp) {
+                    console.log('[IB Sync] ALPs S1: Range API status:', resp.status, '| Response length:', (resp.responseText || '').length);
+                    console.log('[IB Sync] ALPs S1: Range API first 2000 chars:', (resp.responseText || '').substring(0, 2000));
 
                     if (resp.status !== 200) {
-
-                        console.log('[IB Sync] ALPs S1: Failed to get Weekly plan, status:', resp.status);
-
+                        console.log('[IB Sync] ALPs S1: Range query failed. Full response:', resp.responseText);
                         resolve(null);
-
                         return;
-
                     }
-
                     try {
+                        var parsed = JSON.parse(resp.responseText);
 
-                        var tagData = JSON.parse(resp.responseText);
-
-                        console.log('[IB Sync] ALPs S1: Tag response keys:', Object.keys(tagData).join(', '));
-
-                        // Extract plan ID from response
-
-                        var planId = tagData.planId || tagData.id || (tagData.plan && tagData.plan.id) || null;
-
-                        if (!planId && typeof tagData === 'object') {
-
-                            // Search for UUID pattern in top-level values
-
-                            var keys = Object.keys(tagData);
-
-                            for (var k = 0; k < keys.length; k++) {
-
-                                var val = tagData[keys[k]];
-
-                                if (typeof val === 'string' && val.match(/^[0-9a-f]{8}-[0-9a-f]{4}-/)) {
-
-                                    planId = val; break;
-
-                                }
-
+                        // Handle various response shapes - API returns { planMetaDataList: [...] }
+                        var plans;
+                        if (Array.isArray(parsed)) {
+                            plans = parsed;
+                        } else if (parsed && parsed.planMetaDataList && Array.isArray(parsed.planMetaDataList)) {
+                            plans = parsed.planMetaDataList;
+                        } else if (parsed && parsed.plans && Array.isArray(parsed.plans)) {
+                            plans = parsed.plans;
+                        } else if (parsed && parsed.data && Array.isArray(parsed.data)) {
+                            plans = parsed.data;
+                        } else if (parsed && typeof parsed === 'object') {
+                            var arrKey = Object.keys(parsed).find(function(k) { return Array.isArray(parsed[k]); });
+                            if (arrKey) {
+                                console.log('[IB Sync] ALPs S1: Found array in key:', arrKey, 'length:', parsed[arrKey].length);
+                                plans = parsed[arrKey];
+                            } else {
+                                console.log('[IB Sync] ALPs S1: No array found. Keys:', Object.keys(parsed).join(', '));
+                                resolve(null);
+                                return;
                             }
-
-                        }
-
-                        if (!planId) {
-
-                            console.log('[IB Sync] ALPs S1: No plan ID found. Response:', JSON.stringify(tagData).substring(0, 1000));
-
-                            resolve(null);
-
-                            return;
-
-                        }
-
-                        console.log('[IB Sync] ALPs S1: Weekly plan ID =', planId);
-
-
-
-                        // Step 2: Get plan capacity data
-
-                        // Calculate date range centered on the FCLM page date
-
-                        var fclmUrlParams = new URLSearchParams(window.location.search);
-
-                        var fclmSpanType = fclmUrlParams.get('spanType') || '';
-
-                        var fclmDateStr = '';
-
-                        if (fclmSpanType === 'Intraday') {
-
-                            fclmDateStr = (fclmUrlParams.get('startDateIntraday') || '').split(/[\s+T]/)[0];
-
-                        } else if (fclmSpanType === 'Week') {
-
-                            fclmDateStr = fclmUrlParams.get('startDateWeek') || '';
-
                         } else {
-
-                            fclmDateStr = fclmUrlParams.get('startDateDay') || '';
-
+                            console.log('[IB Sync] ALPs S1: Unexpected type:', typeof parsed);
+                            resolve(null);
+                            return;
                         }
 
-                        var centerDate = fclmDateStr ? new Date(fclmDateStr.replace(/\//g, '-')) : new Date();
+                        console.log('[IB Sync] ALPs S1: Found', plans.length, 'plans in range');
 
-                        if (isNaN(centerDate.getTime())) centerDate = new Date();
-
-                        var startDate = new Date(centerDate);
-
-                        startDate.setDate(centerDate.getDate() - 7);
-
-                        var endDate = new Date(centerDate);
-
-                        endDate.setDate(centerDate.getDate() + 7);
-
-                        var startStr = startDate.getFullYear() + '-' + String(startDate.getMonth()+1).padStart(2,'0') + '-' + String(startDate.getDate()).padStart(2,'0');
-
-                        var endStr = endDate.getFullYear() + '-' + String(endDate.getMonth()+1).padStart(2,'0') + '-' + String(endDate.getDate()).padStart(2,'0');
-
-                        var dataUrl = alpsBase + '/report/FULFILLMENT_CENTER/' + WAREHOUSE + '/getPlanSelectionData'
-
-                            + '?view=dailyView&selection=inbound-joint&planId=' + planId + '&withUserOverrides=true'
-
-                            + '&startDate=' + startStr + '&endDate=' + endStr + '&withComputedValues=true';
-
-                        console.log('[IB Sync] ALPs S1: Fetching plan data with dates', startStr, 'to', endStr);
-
-                        GM_xmlhttpRequest({
-
-                            method: 'GET',
-
-                            url: dataUrl,
-
-                            headers: { 'Accept': 'application/json' },
-
-                            onload: function(resp2) {
-
-                                if (resp2.status !== 200) {
-
-                                    console.log('[IB Sync] ALPs S1: Failed to get plan data, status:', resp2.status);
-
-                                    resolve(null);
-
-                                    return;
-
-                                }
-
-                                try {
-
-                                    var planData = JSON.parse(resp2.responseText);
-
-                                    console.log('[IB Sync] ALPs S1: Plan data keys:', Object.keys(planData).join(', '));
-
-                                    console.log('[IB Sync] ALPs S1: Plan data sample:', JSON.stringify(planData).substring(0, 2000));
-
-                                    var s1 = parseALPsCapacity(planData);
-
-                                    console.log('[IB Sync] ALPs S1: Parsed =', JSON.stringify(s1));
-
-                                    resolve(s1);
-
-                                } catch(e) {
-
-                                    console.log('[IB Sync] ALPs S1: Parse error:', e.message);
-
-                                    resolve(null);
-
-                                }
-
-                            },
-
-                            onerror: function() { resolve(null); }
-
+                        plans.slice(0, 3).forEach(function(p, idx) {
+                            console.log('[IB Sync] ALPs S1: Plan[' + idx + ']:', JSON.stringify(p).substring(0, 500));
                         });
 
-                    } catch(e) {
+                        // Step 4: Find Friday OPTIMIZER plan
+                        var fridayPlan = null;
+                        plans.forEach(function(p) {
+                            var meta = p.planMetaData || p;
+                            var model = meta.modelType || '';
+                            var created = new Date(meta.createdAt);
+                            var createdDay = created.getDay();
+                            console.log('[IB Sync] ALPs S1: Checking - model:', model, 'createdDay:', createdDay, '(' + created.toISOString().substring(0,19) + ')', 'by:', (meta.plannerAccount && meta.plannerAccount.plannerName) || '?');
+                            if (model.indexOf('OPTIMIZER') !== -1 && createdDay === 5) {
+                                if (!fridayPlan || meta.createdAt > fridayPlan.createdAt) {
+                                    fridayPlan = meta;
+                                }
+                            }
+                        });
 
-                        console.log('[IB Sync] ALPs S1: Tag parse error:', e.message);
+                        if (!fridayPlan) {
+                            console.log('[IB Sync] ALPs S1: No Friday OPTIMIZER plan matched.');
+                            resolve(null);
+                            return;
+                        }
 
-                        resolve(null);
+                        var planId = fridayPlan.planId;
+                        var plannerName = (fridayPlan.plannerAccount && fridayPlan.plannerAccount.plannerName) || 'unknown';
+                        console.log('[IB Sync] ALPs S1: MATCH - plan:', planId, 'by:', plannerName);
+                        fetchCapacityData(planId, reviewDate);
 
-                    }
-
+                    } catch(e) { console.log('[IB Sync] ALPs S1: JSON parse error:', e.message); resolve(null); }
                 },
-
-                onerror: function() { resolve(null); }
-
+                onerror: function(err) { console.log('[IB Sync] ALPs S1: Network error:', JSON.stringify(err)); resolve(null); }
             });
 
+            function fetchCapacityData(planId, centerDate) {
+                var sd = new Date(centerDate); sd.setDate(centerDate.getDate() - 7);
+                var ed = new Date(centerDate); ed.setDate(centerDate.getDate() + 7);
+                var ss = sd.getFullYear() + '-' + String(sd.getMonth()+1).padStart(2,'0') + '-' + String(sd.getDate()).padStart(2,'0');
+                var es = ed.getFullYear() + '-' + String(ed.getMonth()+1).padStart(2,'0') + '-' + String(ed.getDate()).padStart(2,'0');
+                var dataUrl = alpsBase + '/report/FULFILLMENT_CENTER/' + WAREHOUSE + '/getPlanSelectionData?view=dailyView&selection=inbound-joint&planId=' + planId + '&withUserOverrides=true&startDate=' + ss + '&endDate=' + es + '&withComputedValues=true';
+                console.log('[IB Sync] ALPs S1: Fetching capacity. URL:', dataUrl);
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: dataUrl,
+                    headers: { 'Accept': 'application/json' },
+                    onload: function(resp) {
+                        console.log('[IB Sync] ALPs S1: Capacity API status:', resp.status, '| length:', (resp.responseText || '').length);
+                        if (resp.status !== 200) { console.log('[IB Sync] ALPs S1: Capacity response:', (resp.responseText || '').substring(0, 500)); resolve(null); return; }
+                        try {
+                            var planData = JSON.parse(resp.responseText);
+                            console.log('[IB Sync] ALPs S1: Capacity data type:', typeof planData, Array.isArray(planData) ? 'array len=' + planData.length : 'keys=' + Object.keys(planData || {}).join(','));
+                            var s1 = parseALPsCapacity(planData);
+                            console.log('[IB Sync] ALPs S1: FINAL RESULT =', JSON.stringify(s1));
+                            resolve(s1);
+                        } catch(e) { console.log('[IB Sync] ALPs S1: Capacity parse error:', e.message); resolve(null); }
+                    },
+                    onerror: function() { console.log('[IB Sync] ALPs S1: Capacity network error'); resolve(null); }
+                });
+            }
         });
-
     }
 
 
@@ -7845,45 +7798,21 @@ function fetchALPsS1() {
 
                     // Navigate: subRows[0] (Volume) > subRows[0] (Capacity) > subRows[1] (Forecast) > date
 
-                    var volume = shift.subRows && shift.subRows[0];
-
+                    var volume = null;
+                    if (shift.subRows) { for (var vi = 0; vi < shift.subRows.length; vi++) { if ((shift.subRows[vi].header || '').trim() === 'Volume') { volume = shift.subRows[vi]; break; } } }
                     if (!volume || !volume.subRows) return;
 
-                    var capacity = volume.subRows[0]; // Capacity section
-
-                    if (!capacity || !capacity.subRows) return;
-
-
-
-                    // Find the Forecast row (usually index 1, but search by name to be safe)
-
-                    var forecast = null;
-
-                    for (var i = 0; i < capacity.subRows.length; i++) {
-
-                        if (capacity.subRows[i].header === 'Forecast') {
-
-                            forecast = capacity.subRows[i];
-
-                            break;
-
-                        }
-
-                    }
-
-                    if (!forecast) {
-
-                        // Fallback: try index 1
-
-                        forecast = capacity.subRows[1];
-
-                    }
-
-                    if (!forecast || !forecast[todayStr]) return;
+                    var capacity = null;
+                    for (var ci = 0; ci < volume.subRows.length; ci++) { if ((volume.subRows[ci].header || '').trim() === 'Capacity') { capacity = volume.subRows[ci]; break; } }
+                    if (!capacity) return;
 
 
 
-                    var val = forecast[todayStr].value;
+                    // Read capacity value directly, fallback to Forecast subRow
+                    var val = null;
+                    if (capacity[todayStr] && capacity[todayStr].value != null) { val = capacity[todayStr].value; }
+                    else if (capacity.subRows) { for (var fi = 0; fi < capacity.subRows.length; fi++) { if (capacity.subRows[fi].header === 'Forecast' && capacity.subRows[fi][todayStr]) { val = capacity.subRows[fi][todayStr].value; break; } } }
+                    if (val == null) return;
 
                     if (val != null && val !== 0) {
 
