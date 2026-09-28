@@ -413,11 +413,11 @@
 
         } else {
 
-            if (hour >= 18 && hour < 22) return 'P1';
+            if (hour >= 18 && hour < 21) return 'P1';
 
-            if (hour >= 22 || hour < 2) return 'P2';
+            if (hour >= 21 || hour < 1) return 'P2';
 
-            if (hour >= 2 && hour < 6) return 'P3';
+            if (hour >= 1 && hour < 6) return 'P3';
 
             return 'EOS'; // Outside night shift hours viewing night data = show EOS
 
@@ -1630,7 +1630,8 @@
             // ALPs: S1 Capacity Forecast (Weekly plan)
 
             fetchALPsS1(),
-            fetchPilesData()];
+            fetchPilesData(),
+            fetchS1Actual()];
 
 
 
@@ -1655,6 +1656,8 @@
             var shiftPerfResult = results[8].status === 'fulfilled' ? results[8].value : { ok: false, data: null };
 
             var alpsS1Result = results[9].status === 'fulfilled' ? results[9].value : null;
+
+            var s1ActualVolume = results[11] && results[11].status === 'fulfilled' ? results[11].value : null;
 
 
 
@@ -1931,6 +1934,7 @@
                 })() : null,
 
                 alpsS1: alpsS1Result,
+                s1Actual: s1ActualVolume,
 
             };
 
@@ -3002,11 +3006,11 @@
 
             return {
 
-                P1: { start: dateStr + '+18%3A00', end: dateStr + '+22%3A00' },
+                P1: { start: dateStr + '+18%3A00', end: dateStr + '+21%3A00' },
 
-                P2: { start: dateStr + '+22%3A00', end: nextDateStr + '+02%3A00' },
+                P2: { start: dateStr + '+21%3A00', end: nextDateStr + '+01%3A00' },
 
-                P3: { start: nextDateStr + '+02%3A00', end: nextDateStr + '+06%3A00' },
+                P3: { start: nextDateStr + '+01%3A00', end: nextDateStr + '+06%3A00' },
 
                 EOS: { start: dateStr + '+18%3A00', end: nextDateStr + '+06%3A00' }
 
@@ -3656,7 +3660,7 @@
 
         } else {
 
-            periodHours = { P1: [18, 22], P2: [22, 26], P3: [26, 30] };
+            periodHours = { P1: [18, 21], P2: [21, 25], P3: [25, 30] }; // 21=9pm, 25=1am, 30=6am next day
 
         }
 
@@ -3940,7 +3944,7 @@
 
         } else {
 
-            periodHours = { P1: [18, 22], P2: [22, 26], P3: [26, 30] }; // 22=10pm, 26=2am, 30=6am next day
+            periodHours = { P1: [18, 21], P2: [21, 25], P3: [25, 30] }; // 21=9pm, 25=1am, 30=6am next day // 22=10pm, 26=2am, 30=6am next day
 
         }
 
@@ -3960,48 +3964,31 @@
 
 
 
-        // Per-floor stow URL (uses osm_ids=31 for floor breakdown) — uses CURRENT PERIOD time range
-
+        // Per-floor URL builders for any period time range
         var currentPeriod = getCurrentPeriod();
-
+        function buildFloorStowUrl(hrs) {
+            var us = toUTCHour(hrs[0]), ue = toUTCHour(hrs[1]);
+            var sd = us >= 24 ? roboNextDay(dateStr) : dateStr;
+            var ed = ue >= 24 ? roboNextDay(dateStr) : dateStr;
+            return 'https://roboscout.amazon.com/view_plot_data/?sites=(' + WAREHOUSE + ')&current_day=false'
+                + '&startDateTime=' + sd + '+' + String(us % 24).padStart(2, '0') + ':00:00'
+                + '&endDateTime=' + ed + '+' + String(ue % 24).padStart(2, '0') + ':00:00'
+                + '&mom_ids=394,321,362,379,426&osm_ids=31&oxm_ids=435&ofm_ids=&viz=nvd3Table'
+                + '&instance_id=' + SITE_SETTINGS.ROBOSCOUT_INSTANCE_ID + '&object_id=' + SITE_SETTINGS.ROBOSCOUT_STOW_OBJECT_ID + '&BrowserTZ=' + SITE_SETTINGS.TIMEZONE + '&app_name=RoboScout';
+        }
+        function buildFloorOowaUrl(hrs) {
+            var us = toUTCHour(hrs[0]), ue = toUTCHour(hrs[1]);
+            var sd = us >= 24 ? roboNextDay(dateStr) : dateStr;
+            var ed = ue >= 24 ? roboNextDay(dateStr) : dateStr;
+            return 'https://roboscout.amazon.com/view_plot_data/?sites=(' + WAREHOUSE + ')'
+                + '&startDateTime=' + sd + '+' + String(us % 24).padStart(2, '0') + ':00:00'
+                + '&endDateTime=' + ed + '+' + String(ue % 24).padStart(2, '0') + ':00:00'
+                + '&mom_ids=2170,2168&osm_ids=&oxm_ids=2594&ofm_ids=1017&instance_id=0&object_id=' + SITE_SETTINGS.ROBOSCOUT_OOWA_OBJECT_ID + '&BrowserTZ=' + SITE_SETTINGS.TIMEZONE + '&app_name=RoboScout&viz=nvd3Table';
+        }
         var floorPeriodHrs = (currentPeriod === 'P1') ? periodHours.P1 : (currentPeriod === 'P2') ? periodHours.P2 : (currentPeriod === 'P3') ? periodHours.P3 : [startHour, endHour];
-
-        var utcStart = toUTCHour(floorPeriodHrs[0]);
-
-        var utcEnd = toUTCHour(floorPeriodHrs[1]);
-
-        var floorStartDate = utcStart >= 24 ? roboNextDay(dateStr) : dateStr;
-
-        var floorEndDate = utcEnd >= 24 ? roboNextDay(dateStr) : dateStr;
-
-        var floorStartH = utcStart % 24;
-
-        var floorEndH = utcEnd % 24;
-
-        var floorUrl = 'https://roboscout.amazon.com/view_plot_data/?sites=(' + WAREHOUSE + ')&current_day=false'
-
-            + '&startDateTime=' + floorStartDate + '+' + String(floorStartH).padStart(2, '0') + ':00:00'
-
-            + '&endDateTime=' + floorEndDate + '+' + String(floorEndH).padStart(2, '0') + ':00:00'
-
-            + '&mom_ids=394,321,362,379,426&osm_ids=31&oxm_ids=435&ofm_ids=&viz=nvd3Table'
-
-            + '&instance_id=' + SITE_SETTINGS.ROBOSCOUT_INSTANCE_ID + '&object_id=' + SITE_SETTINGS.ROBOSCOUT_STOW_OBJECT_ID + '&BrowserTZ=' + SITE_SETTINGS.TIMEZONE + '&app_name=RoboScout';
-
-
-
-        // Per-floor OOWA URL (different params: oxm_ids=2594, object_id=21628)
-
-        var floorOowaUrl = 'https://roboscout.amazon.com/view_plot_data/?sites=(' + WAREHOUSE + ')'
-
-            + '&startDateTime=' + floorStartDate + '+' + String(floorStartH).padStart(2, '0') + ':00:00'
-
-            + '&endDateTime=' + floorEndDate + '+' + String(floorEndH).padStart(2, '0') + ':00:00'
-
-            + '&mom_ids=2170,2168&osm_ids=&oxm_ids=2594&ofm_ids=1017&instance_id=0&object_id=' + SITE_SETTINGS.ROBOSCOUT_OOWA_OBJECT_ID + '&BrowserTZ=' + SITE_SETTINGS.TIMEZONE + '&app_name=RoboScout&viz=nvd3Table';
-
-
-
+        var floorUrl = buildFloorStowUrl(floorPeriodHrs);
+        var floorOowaUrl = buildFloorOowaUrl(floorPeriodHrs);
+        
         console.log('[IB Sync] RoboScout stow URL:', stowUrl.substring(0, 150) + '...');
 
 
@@ -4130,6 +4117,7 @@
 
             var oowaP3Json = results[9].status === 'fulfilled' ? results[9].value : null;
 
+            
 
 
             var get = function(json, key) { if (!json || !json.data) return null; var item = json.data.find(function(d) { return d.key === key && d.type !== 'string' && d.type !== 'date'; }); if (!item) return null; var v = parseFloat(item.yValue); return isNaN(v) ? null : v; };
@@ -4179,6 +4167,8 @@
             });
 
             console.log('[IB Sync] RoboScout by floor:', JSON.stringify(byFloor));
+
+            
 
 
 
@@ -4852,6 +4842,22 @@
 
                 s1Goal += ' (DS: ' + formatNum(alps.dayCapacity) + ' | NS: ' + formatNum(alps.nightCapacity) + ')';
 
+            }
+
+            // S1 Actual (2AM-2AM IB Total Volume) with pacing
+            var s1Actual = introData.trailerPlanner.s1Actual;
+            if (s1Actual != null) {
+                var s1Pct = Math.round((s1Actual / introData.trailerPlanner.s1Goal) * 100);
+                // Linear pacing: hours since 2AM / 24 hours
+                var now = new Date();
+                var today2AM = new Date(now);
+                today2AM.setHours(2, 0, 0, 0);
+                if (now < today2AM) today2AM.setDate(today2AM.getDate() - 1);
+                var hoursElapsed = (now - today2AM) / 3600000;
+                var expectedPct = Math.min(Math.round((hoursElapsed / 24) * 100), 100);
+                var paceColor = s1Pct >= expectedPct ? '#00cc00' : '#ff4444';
+                var paceIcon = s1Pct >= expectedPct ? '\u25B2' : '\u25BC';
+                s1Goal += '<br>S1 Actual: ' + formatNum(s1Actual) + ' / ' + formatNum(introData.trailerPlanner.s1Goal) + ' (' + s1Pct + '%) <span style="color:' + paceColor + ';font-weight:bold;">' + paceIcon + '</span>';
             }
 
         }
@@ -5709,90 +5715,51 @@
                     copyBtn.textContent = '\u23F3 Capturing...';
 
                     // Ensure content is visible for capture
-
                     var contentEl = document.getElementById('sync-dashboard-content');
-
                     var wasHidden = contentEl && contentEl.style.display === 'none';
-
                     if (wasHidden) contentEl.style.display = 'grid';
 
-                    // Small delay to let browser render before capture
-
-                    setTimeout(function() {
-
-                    html2canvas(container, {
-
-                        backgroundColor: '#fafafa',
-
-                        scale: 2,
-
-                        useCORS: true,
-
-                        logging: true,
-
-                        allowTaint: true,
-
-                        foreignObjectRendering: false,
-
-                        removeContainer: true
-
-                    }).then(function(canvas) {
-
-                        canvas.toBlob(function(blob) {
-
-                            if (!blob) {
-
-                                copyBtn.textContent = '\u274C No image';
-
-                                setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
-
-                                if (wasHidden) contentEl.style.display = 'none';
-
-                                return;
-
-                            }
-
-                            navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(function() {
-
-                                copyBtn.textContent = '\u2705 Copied!';
-
-                                setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
-
-                                if (wasHidden) contentEl.style.display = 'none';
-
+                    // Build a deferred blob promise for ClipboardItem
+                    // This lets us call clipboard.write synchronously (preserving user gesture)
+                    // while html2canvas runs async
+                    var blobPromise = new Promise(function(resolveBlob, rejectBlob) {
+                        setTimeout(function() {
+                            html2canvas(container, {
+                                backgroundColor: '#fafafa',
+                                scale: 2,
+                                useCORS: true,
+                                logging: false,
+                                allowTaint: true,
+                                foreignObjectRendering: false,
+                                removeContainer: true
+                            }).then(function(canvas) {
+                                canvas.toBlob(function(blob) {
+                                    if (wasHidden) contentEl.style.display = 'none';
+                                    if (blob) { resolveBlob(blob); } else { rejectBlob('No blob'); }
+                                }, 'image/png');
                             }).catch(function(err) {
-
-                                console.log('[IB Sync] Clipboard write failed:', err);
-
-                                // Fallback: open image in new tab
-
-                                var url = canvas.toDataURL('image/png');
-
-                                window.open(url, '_blank');
-
-                                copyBtn.textContent = '\u2705 Opened in tab';
-
-                                setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
-
                                 if (wasHidden) contentEl.style.display = 'none';
-
+                                rejectBlob(err);
                             });
-
-                        }, 'image/png');
-
-                    }).catch(function(err) {
-
-                        console.log('[IB Sync] html2canvas error:', err);
-
-                        copyBtn.textContent = '\u274C Failed';
-
-                        setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
-
-                        if (wasHidden) contentEl.style.display = 'none';
-
+                        }, 300);
                     });
 
-                    }, 300);
+                    // Write to clipboard immediately (user gesture preserved)
+                    navigator.clipboard.write([
+                        new ClipboardItem({ 'image/png': blobPromise })
+                    ]).then(function() {
+                        copyBtn.textContent = '\u2705 Copied!';
+                        setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
+                    }).catch(function(err) {
+                        console.log('[IB Sync] Clipboard write failed:', err);
+                        // Fallback: render and open in tab
+                        blobPromise.then(function(blob) {
+                            var url = URL.createObjectURL(blob);
+                            window.open(url, '_blank');
+                        }).catch(function() {});
+                        copyBtn.textContent = '\u2705 Opened in tab';
+                        setTimeout(function() { copyBtn.textContent = '\u{1F4CB} Copy'; }, 2000);
+                    });
 
                 };
 
@@ -6242,19 +6209,22 @@
 
         sectionHeader.style.cssText = 'padding:6px 10px;background:#232f3e;color:white;font-size:11px;font-weight:bold;';
 
-        sectionHeader.textContent = 'INPUT METRICS (By Floor)';
+        var period = getCurrentPeriod();
+        var shift = getCurrentShift();
+        var dayTimes = { P1: '6:00 - 10:00 AM', P2: '10:00 AM - 2:00 PM', P3: '2:00 - 6:00 PM', EOS: 'Full Shift' };
+        var nightTimes = { P1: '6:00 - 9:00 PM', P2: '9:00 PM - 1:00 AM', P3: '1:00 - 6:00 AM', EOS: 'Full Shift' };
+        var timeMap = (shift === 'Day') ? dayTimes : nightTimes;
 
+        // Build header with period dropdown
+        var periodLabel = (period === 'EOS') ? 'EOS (Full Shift)' : period + ' (' + timeMap[period] + ')';
+        sectionHeader.textContent = 'INPUT METRICS (By Floor) \u2014 ' + periodLabel;
         section.appendChild(sectionHeader);
 
-
-
         var zones = vantageData.zones || {};
-
+        
         var zoneNames = CONFIG.vantage.zones;
 
         var labels = SITE_SETTINGS.FLOORS;
-
-        var period = getCurrentPeriod();
 
 
 
@@ -6302,7 +6272,7 @@
 
 
 
-        var bodyHtml = '';
+                    var bodyHtml = '';
 
         metricsMap.forEach(function(m, idx) {
 
@@ -6566,7 +6536,10 @@
 
 
 
-        table.innerHTML = '<thead>' + headerHtml + '</thead><tbody>' + bodyHtml + '</tbody>';
+        
+
+            table.innerHTML = '<thead>' + headerHtml + '</thead><tbody>' + bodyHtml + '</tbody>';
+        
 
 
 
@@ -7502,6 +7475,64 @@
     // ALPs S1 CAPACITY FORECAST (Auto-fetch)
 
     // ==========================================
+    // S1 ACTUAL: IB Total Volume (2AM-2AM HQ window)
+    // ==========================================
+    function fetchS1Actual() {
+        return new Promise(function(resolve) {
+            var fclmDate = getSelectedDate();
+            if (!fclmDate) { resolve(null); return; }
+
+            // Build 2AM-to-2AM window: reviewDate 02:00 -> reviewDate+1 02:00
+            var startDateSlash = fclmDate.replace(/-/g, '/');
+            var nextDate = new Date(fclmDate + 'T12:00:00');
+            nextDate.setDate(nextDate.getDate() + 1);
+            var nextDateSlash = nextDate.getFullYear() + '/' + String(nextDate.getMonth()+1).padStart(2,'0') + '/' + String(nextDate.getDate()).padStart(2,'0');
+
+            var url = 'https://fclm-portal.amazon.com/reports/processPathRollup?reportFormat=HTML'
+                + '&warehouseId=' + WAREHOUSE + '&spanType=Intraday'
+                + '&startDateIntraday=' + startDateSlash + '&startHourIntraday=2&startMinuteIntraday=0'
+                + '&endDateIntraday=' + nextDateSlash + '&endHourIntraday=2&endMinuteIntraday=0'
+                + '&includeOnlyWarehouse=on&employmentType=AllEmployees';
+
+            console.log('[IB Sync] S1 Actual: Fetching 2AM-2AM for', fclmDate);
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                onload: function(resp) {
+                    if (resp.status !== 200) { console.log('[IB Sync] S1 Actual: HTTP', resp.status); resolve(null); return; }
+                    try {
+                        var doc = new DOMParser().parseFromString(resp.responseText, 'text/html');
+                        var rows = doc.querySelectorAll('tr');
+                        var ibVolume = null;
+
+                        rows.forEach(function(row) {
+                            var firstCell = row.querySelector('td, th');
+                            if (!firstCell) return;
+                            var label = firstCell.textContent.trim();
+                            if (label === 'Inbound-TOTAL' || label === 'IB Total') {
+                                var volCell = row.querySelector('.actualVolume');
+                                if (volCell) {
+                                    var v = parseFloat(volCell.textContent.trim().replace(/,/g, ''));
+                                    if (!isNaN(v)) ibVolume = Math.round(v);
+                                }
+                            }
+                        });
+
+                        console.log('[IB Sync] S1 Actual: IB Total Volume (2AM-2AM):', ibVolume);
+                        resolve(ibVolume);
+                    } catch(e) {
+                        console.log('[IB Sync] S1 Actual: Parse error:', e.message);
+                        resolve(null);
+                    }
+                },
+                onerror: function() { resolve(null); }
+            });
+        });
+    }
+
+
+    // ==========================================
 
     // Fetches S1 Capacity from ALPs API using the Weekly-tagged plan.
 
@@ -7589,7 +7620,7 @@ function fetchALPsS1() {
                 headers: { 'Accept': 'application/json' },
                 onload: function(resp) {
                     console.log('[IB Sync] ALPs S1: Range API status:', resp.status, '| Response length:', (resp.responseText || '').length);
-                    console.log('[IB Sync] ALPs S1: Range API first 2000 chars:', (resp.responseText || '').substring(0, 2000));
+                    // Debug: raw response logged on failure only
 
                     if (resp.status !== 200) {
                         console.log('[IB Sync] ALPs S1: Range query failed. Full response:', resp.responseText);
@@ -7627,9 +7658,7 @@ function fetchALPsS1() {
 
                         console.log('[IB Sync] ALPs S1: Found', plans.length, 'plans in range');
 
-                        plans.slice(0, 3).forEach(function(p, idx) {
-                            console.log('[IB Sync] ALPs S1: Plan[' + idx + ']:', JSON.stringify(p).substring(0, 500));
-                        });
+                        // Plan details logged in the checking loop below
 
                         // Step 4: Find Friday OPTIMIZER plan
                         var fridayPlan = null;
@@ -7638,10 +7667,16 @@ function fetchALPsS1() {
                             var model = meta.modelType || '';
                             var created = new Date(meta.createdAt);
                             var createdDay = created.getDay();
-                            console.log('[IB Sync] ALPs S1: Checking - model:', model, 'createdDay:', createdDay, '(' + created.toISOString().substring(0,19) + ')', 'by:', (meta.plannerAccount && meta.plannerAccount.plannerName) || '?');
-                            if (model.indexOf('OPTIMIZER') !== -1 && createdDay === 5) {
-                                if (!fridayPlan || meta.createdAt > fridayPlan.createdAt) {
-                                    fridayPlan = meta;
+                            // Checking each plan silently
+                            if (model.indexOf('OPTIMIZER') !== -1) {
+                                // Check if plan was created on the target Friday (in CDT/local time)
+                                var localCreated = new Date(created.getTime() - 5 * 3600000); // UTC to CDT
+                                var localDate = localCreated.getUTCFullYear() + '-' + String(localCreated.getUTCMonth()+1).padStart(2,'0') + '-' + String(localCreated.getUTCDate()).padStart(2,'0');
+                                var fridayDateStr = planFriday.getFullYear() + '-' + String(planFriday.getMonth()+1).padStart(2,'0') + '-' + String(planFriday.getDate()).padStart(2,'0');
+                                if (localDate === fridayDateStr) {
+                                    if (!fridayPlan || meta.createdAt > fridayPlan.createdAt) {
+                                        fridayPlan = meta;
+                                    }
                                 }
                             }
                         });
@@ -7654,7 +7689,8 @@ function fetchALPsS1() {
 
                         var planId = fridayPlan.planId;
                         var plannerName = (fridayPlan.plannerAccount && fridayPlan.plannerAccount.plannerName) || 'unknown';
-                        console.log('[IB Sync] ALPs S1: MATCH - plan:', planId, 'by:', plannerName);
+                        var planCreatedAt = new Date(fridayPlan.createdAt);
+                        console.log('[IB Sync] ALPs S1: MATCH - plan:', planId, 'by:', plannerName, 'created:', planCreatedAt.toISOString());
                         fetchCapacityData(planId, reviewDate);
 
                     } catch(e) { console.log('[IB Sync] ALPs S1: JSON parse error:', e.message); resolve(null); }
@@ -7806,12 +7842,14 @@ function fetchALPsS1() {
                     for (var ci = 0; ci < volume.subRows.length; ci++) { if ((volume.subRows[ci].header || '').trim() === 'Capacity') { capacity = volume.subRows[ci]; break; } }
                     if (!capacity) return;
 
+                    // Diagnostic: dump all available values under Volume and Capacity for this date
+                    console.log('[IB Sync] ALPs S1 DIAG:', shiftName, '| date:', todayStr);
+                    console.log('[IB Sync] ALPs S1 DIAG: Volume direct:', volume[todayStr] ? volume[todayStr].value : 'null');
+                    if (volume.subRows) { volume.subRows.forEach(function(sr) { console.log('[IB Sync] ALPs S1 DIAG: Volume >', sr.header, ':', sr[todayStr] ? sr[todayStr].value : 'null'); if (sr.subRows) { sr.subRows.forEach(function(sr2) { console.log('[IB Sync] ALPs S1 DIAG: Volume >', sr.header, '>', sr2.header, ':', sr2[todayStr] ? sr2[todayStr].value : 'null'); }); } }); }
 
-
-                    // Read capacity value directly, fallback to Forecast subRow
+                    // Read S1 from Volume > Capacity > Forecast
                     var val = null;
-                    if (capacity[todayStr] && capacity[todayStr].value != null) { val = capacity[todayStr].value; }
-                    else if (capacity.subRows) { for (var fi = 0; fi < capacity.subRows.length; fi++) { if (capacity.subRows[fi].header === 'Forecast' && capacity.subRows[fi][todayStr]) { val = capacity.subRows[fi][todayStr].value; break; } } }
+                    if (capacity.subRows) { for (var fi = 0; fi < capacity.subRows.length; fi++) { if (capacity.subRows[fi].header === 'Forecast' && capacity.subRows[fi][todayStr]) { val = capacity.subRows[fi][todayStr].value; break; } } }
                     if (val == null) return;
 
                     if (val != null && val !== 0) {
@@ -8148,6 +8186,8 @@ function fetchALPsS1() {
 
                 }
 
+                
+
             }
 
 
@@ -8177,16 +8217,19 @@ function fetchALPsS1() {
             if (alpsS1Data && alpsS1Data.s1Goal) {
 
                 console.log('[IB Sync] ALPs S1: using capacity', alpsS1Data.s1Goal);
+                console.log('[IB Sync] S1 Actual Volume (2AM-2AM):', introRaw.s1Actual);
 
                 introData.trailerPlanner.s1Goal = alpsS1Data.s1Goal;
 
                 introData.trailerPlanner.alpsS1 = alpsS1Data;
+                introData.trailerPlanner.s1Actual = introRaw.s1Actual || null;
 
             } else {
 
                 console.log('[IB Sync] ALPs S1: call failed or no data - leaving S1 blank for manual entry');
 
                 introData.trailerPlanner.s1Goal = null;
+                introData.trailerPlanner.s1Actual = introRaw.s1Actual || null;
 
             }
 
